@@ -1,0 +1,5 @@
+data_root=r"/lfs1/data"
+generated_image_root="results/images"
+pretrained_generator_root="results/generators"
+checkpoint_root="results/checkpoints"
+log_root="results/log"
