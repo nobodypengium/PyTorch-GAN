@@ -68,18 +68,18 @@ class Generator(nn.Module):
         self.conv_blocks = nn.Sequential(
             nn.BatchNorm2d(128),
             nn.Upsample(scale_factor=2),
-            nn.Conv2d(128, 128, 3, stride=1, padding=1),
-            nn.BatchNorm2d(128, 0.8),
+            nn.Conv2d(128, 128, 3, stride=1, padding=1), # 128->128
+            nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Upsample(scale_factor=2),
-            nn.Conv2d(128, 64, 3, stride=1, padding=1),
-            nn.BatchNorm2d(64, 0.8),
+            nn.Conv2d(128, 64, 3, stride=1, padding=1), # 128 -> 64
+            nn.BatchNorm2d(64),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(64, opt.channels, 3, stride=1, padding=1),
+            nn.Conv2d(64, opt.channels, 3, stride=1, padding=1), # 64 -> 32(输出分辨率)，输出层不加BN，加了会导致训练不稳定
             nn.Tanh(),
         )
 
-    def forward(self, z):
+    def forward(self, z): # 全连接 -> 一系列上采样+卷积+BN -> 输出层Tanh
         out = self.l1(z)
         out = out.view(out.shape[0], 128, self.init_size, self.init_size) # batch*128*8*8(B*C*W*H)
         img = self.conv_blocks(out)
