@@ -63,25 +63,20 @@ class Generator(nn.Module):
         super(Generator, self).__init__()
 
         self.init_size = opt.img_size // 8 # 4
-        self.l1 = nn.Sequential(nn.Linear(opt.latent_dim, 256 * self.init_size ** 2))
+        self.l1 = nn.Sequential(nn.Linear(opt.latent_dim, 256 * self.init_size ** 2)) # 通过本步与forward中的out.view，将latent code处理为第一层卷积接收的小分辨率大深度数据
 
         self.conv_blocks = nn.Sequential(
             nn.BatchNorm2d(256),
-            # nn.Upsample(scale_factor=2),
-            # nn.Conv2d(128, 128, 3, stride=1, padding=1),
             # 4x4 -> 8x8
-            nn.ConvTranspose2d(256,128,4,2,1,bias=False),
+            nn.ConvTranspose2d(256,128,4,2,1,bias=False), # 转置卷积，带有学习特性和上采样功能，增加的像素通过学习获得
             nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2, inplace=True),
-            # nn.Upsample(scale_factor=2),
-            # nn.Conv2d(128, 64, 3, stride=1, padding=1),
             # 8x8 -> 16x16
             nn.ConvTranspose2d(128, 64,4,2, 1, bias=False),
             nn.BatchNorm2d(64),
             nn.LeakyReLU(0.2, inplace=True),
             # 16x16 -> 32x32
             nn.ConvTranspose2d(64, opt.channels,4,2, 1, bias=False),
-            # nn.Conv2d(64, opt.channels, 3, stride=1, padding=1),
             nn.Tanh(),
         )
 
@@ -102,7 +97,7 @@ class Discriminator(nn.Module):
                 block.append(nn.BatchNorm2d(out_filters, momentum=0.8))
             return block
 
-        self.model = nn.Sequential(
+        self.model = nn.Sequential( # 1. 一系列卷积层，深度逐渐*2，分辨率逐渐缩小
             *discriminator_block(opt.channels, 16, bn=False),  # *解包参数，或打包参数，本例中将discriminator_block的返回值解包
             *discriminator_block(16, 32),
             *discriminator_block(32, 64),
@@ -111,12 +106,12 @@ class Discriminator(nn.Module):
 
         # The height and width of downsampled image
         ds_size = opt.img_size // 2 ** 4
-        self.adv_layer = nn.Sequential(nn.Linear(128 * ds_size ** 2, 1), nn.Sigmoid())
+        self.adv_layer = nn.Sequential(nn.Linear(128 * ds_size ** 2, 1), nn.Sigmoid()) # 2. 随后使用全连接层变成一个Scalar
 
     def forward(self, img):
         out = self.model(img)
         out = out.view(out.shape[0], -1)
-        validity = self.adv_layer(out)
+        validity = self.adv_layer(out) # 输出的Scalar表示这张图为真的的概率，由于已用sigmoid处理，只需调用BCEloss跟标答比较
 
         return validity
 
@@ -175,26 +170,26 @@ fixed_z =Variable(Tensor(np.random.normal(0, 1, (opt.batch_size, opt.latent_dim)
 for epoch in range(opt.n_epochs):
     for i, (imgs, _) in enumerate(dataloader):
 
-        # Adversarial ground truths
+        # Adversarial ground truths 创建标答：维度为(batch,1），valid为全1矩阵，fake为全0矩阵  
         valid = Variable(Tensor(imgs.shape[0], 1).fill_(1.0), requires_grad=False)
         fake = Variable(Tensor(imgs.shape[0], 1).fill_(0.0), requires_grad=False)
 
-        # Configure input
+        # Configure input  D的真实输入  
         real_imgs = Variable(imgs.type(Tensor))
 
         # -----------------
         #  Train Generator
         # -----------------
 
-        optimizer_G.zero_grad()
+        optimizer_G.zero_grad() # 每个网络训练一步之前都要清空梯度  
 
-        # Sample noise as generator input
+        # Sample noise as generator input 生成G的输入，隐向量，每次变化的，最开始有个不变的用于生成同一个隐向量的结果
         z = Variable(Tensor(np.random.normal(0, 1, (imgs.shape[0], opt.latent_dim))))
 
-        # Generate a batch of images
+        # Generate a batch of images  将z送入生成器，得到生成图片
         gen_imgs = generator(z)
 
-        # Loss measures generator's ability to fool the discriminator
+        # Loss measures generator's ability to fool the discriminator 将判别器的输出与全0比较，期望判别器判别生成图片是假的，BCE loss  
         g_loss = adversarial_loss(discriminator(gen_imgs), valid)
 
         g_loss.backward()
@@ -207,6 +202,7 @@ for epoch in range(opt.n_epochs):
         optimizer_D.zero_grad()
 
         # Measure discriminator's ability to classify real from generated samples
+        # 由于最大化在编码时难以实现，实际最小化 1/2 {𝐸_(𝑥∼𝑃_𝑑𝑎𝑡𝑎 ) [𝑙𝑜𝑔𝐷(𝑥)−1]+𝐸_(𝑥∼𝑃_𝑔 ) [𝑙𝑜𝑔(𝐷(𝑥))]}
         real_loss = adversarial_loss(discriminator(real_imgs), valid)
         fake_loss = adversarial_loss(discriminator(gen_imgs.detach()), fake)
         d_loss = (real_loss + fake_loss) / 2
