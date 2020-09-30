@@ -246,8 +246,8 @@ for epoch in range(opt.n_epochs):
         pred = np.concatenate([real_aux.data.cpu().numpy(), fake_aux.data.cpu().numpy()], axis=0)
         gt = np.concatenate([labels.data.cpu().numpy(), gen_labels.data.cpu().numpy()], axis=0)
         d_acc = np.mean(np.argmax(pred, axis=1) == gt) #argmax在分类维度上找出概率最大的分类，看有多少个相等的，并除总数，得到准确率（Top-1 Acc）
-        d_real_acc = np.mean(np.argmax(real_aux.data.cpu().numpy(),axis=1)) #在真实数据集上的Top-1 Acc
-        d_fake_acc = np.mean(np.argmax(real_aux.data.cpu().numpy(),axis=1)) #在生成数据集上的Top-1 Acc
+        d_real_acc = np.mean(np.argmax(real_aux.data.cpu().numpy(),axis=1) == labels.data.cpu().numpy()) #在真实数据集上的Top-1 Acc
+        d_fake_acc = np.mean(np.argmax(real_aux.data.cpu().numpy(),axis=1) == labels.data.cpu().numpy()) #在生成数据集上的Top-1 Acc
 
         d_loss.backward()
         optimizer_D.step()
@@ -265,7 +265,7 @@ for epoch in range(opt.n_epochs):
         writer.add_scalar("acc/real_acc",d_real_acc,global_step=batches_done)
         writer.add_scalar("acc/fake_acc",d_fake_acc,global_step=batches_done)
         writer.add_scalar("acc/all_acc",d_acc,global_step=batches_done)
-        writer.add_scalars("acc/acc",{"real":d_real_acc,"fake":d_fake_acc,"all":d_acc})
+        writer.add_scalars("acc/acc",{"real":d_real_acc,"fake":d_fake_acc,"all":d_acc},global_step=batches_done)
         if batches_done % opt.sample_interval == 0:
             sample_image(n_row=opt.sample_rows, batches_done=batches_done, z=fixed_z)
 
