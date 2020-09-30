@@ -14,7 +14,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 
-os.makedirs("images", exist_ok=True)
+from tensorboardX import SummaryWriter # 用于记录训练信息
+import sys # 用于引入上一层的py文件，如果用pycharm执行没有问题，但是如果直接python *.py会找不到文件
+sys.path.append("../..")
+from implementations import global_config
+
+# 根据上层定义好的全局数据构建结果文件夹，所有GAN都使用这种结构
+os.makedirs(global_config.generated_image_root, exist_ok=True)
+os.makedirs(global_config.checkpoint_root, exist_ok=True)
+os.makedirs(global_config.pretrained_generator_root, exist_ok=True)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--n_epochs", type=int, default=200, help="number of epochs of training")
@@ -28,8 +36,17 @@ parser.add_argument("--n_classes", type=int, default=10, help="number of classes
 parser.add_argument("--img_size", type=int, default=32, help="size of each image dimension")
 parser.add_argument("--channels", type=int, default=1, help="number of image channels")
 parser.add_argument("--sample_interval", type=int, default=400, help="interval between image sampling")
+parser.add_argument("--sample_rows", type=int, default=10, help="rows for sampled images")
+# 添加预读取模型相关参数
+parser.add_argument("--generator_interval",type=int,default=20,help="interval between saving generators, epoch")
+# 若启用多卡训练
+parser.add_argument("--gpus",type=str,default=None,help="gpus you want to use, e.g. \"0,1\"")
 opt = parser.parse_args()
 print(opt)
+
+if opt.gpus is not None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = opt.gpus  # 设置可见GPU
+    print("Now using gpu " + opt.gpus +" for training...")
 
 cuda = True if torch.cuda.is_available() else False
 
@@ -49,27 +66,29 @@ class Generator(nn.Module):
 
         self.label_emb = nn.Embedding(opt.n_classes, opt.latent_dim)
 
-        self.init_size = opt.img_size // 4  # Initial size before upsampling
-        self.l1 = nn.Sequential(nn.Linear(opt.latent_dim, 128 * self.init_size ** 2))
+        self.init_size = opt.img_size // 8  # Initial size before upsampling 4*4
+        self.l1 = nn.Sequential(nn.Linear(opt.latent_dim, 256 * self.init_size ** 2))
 
+        # 进行忠实于原文的更改，使用反卷积层（注意本repo原本使用的是Upsample+Conv2d），参见原文4.Result前5行
         self.conv_blocks = nn.Sequential(
+            nn.BatchNorm2d(256),
+            # 4x4 -> 8x8
+            nn.ConvTranspose2d(256, 128, 4, 2, 1, bias=False),  # 转置卷积，带有学习特性和上采样功能，增加的像素通过学习获得
             nn.BatchNorm2d(128),
-            nn.Upsample(scale_factor=2),
-            nn.Conv2d(128, 128, 3, stride=1, padding=1),
-            nn.BatchNorm2d(128, 0.8),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Upsample(scale_factor=2),
-            nn.Conv2d(128, 64, 3, stride=1, padding=1),
-            nn.BatchNorm2d(64, 0.8),
+            # 8x8 -> 16x16
+            nn.ConvTranspose2d(128, 64, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(64),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(64, opt.channels, 3, stride=1, padding=1),
+            # 16x16 -> 32x32
+            nn.ConvTranspose2d(64, opt.channels, 4, 2, 1, bias=False),
             nn.Tanh(),
         )
 
     def forward(self, noise, labels):
-        gen_input = torch.mul(self.label_emb(labels), noise)
+        gen_input = torch.mul(self.label_emb(labels), noise) # 原文没说如何混合label和noise信息，github实现中两种方法都有
         out = self.l1(gen_input)
-        out = out.view(out.shape[0], 128, self.init_size, self.init_size)
+        out = out.view(out.shape[0], 256, self.init_size, self.init_size)
         img = self.conv_blocks(out)
         return img
 
@@ -109,12 +128,17 @@ class Discriminator(nn.Module):
 
 
 # Loss functions
-adversarial_loss = torch.nn.BCELoss()
-auxiliary_loss = torch.nn.CrossEntropyLoss()
+adversarial_loss = torch.nn.BCELoss() # GAN损失，用于判别真伪
+auxiliary_loss = torch.nn.CrossEntropyLoss() # 交叉熵损失，用于判别分类
 
 # Initialize generator and discriminator
 generator = Generator()
 discriminator = Discriminator()
+
+# 若多卡运算，将数据放到两个GPU上，注意是对nn.Model处理，而不需要处理损失，实际上在forward的时候只接收一半的数据
+if opt.gpus is not None:
+    generator = nn.DataParallel(generator)
+    discriminator = nn.DataParallel(discriminator)
 
 if cuda:
     generator.cuda()
@@ -127,12 +151,11 @@ generator.apply(weights_init_normal)
 discriminator.apply(weights_init_normal)
 
 # Configure data loader
-os.makedirs("../../data/mnist", exist_ok=True)
 dataloader = torch.utils.data.DataLoader(
     datasets.MNIST(
-        "../../data/mnist",
+        global_config.data_root,
         train=True,
-        download=True,
+        download=False,
         transform=transforms.Compose(
             [transforms.Resize(opt.img_size), transforms.ToTensor(), transforms.Normalize([0.5], [0.5])]
         ),
@@ -149,16 +172,21 @@ FloatTensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
 LongTensor = torch.cuda.LongTensor if cuda else torch.LongTensor
 
 
-def sample_image(n_row, batches_done):
+def sample_image(n_row, batches_done,z=None):
     """Saves a grid of generated digits ranging from 0 to n_classes"""
-    # Sample noise
-    z = Variable(FloatTensor(np.random.normal(0, 1, (n_row ** 2, opt.latent_dim))))
+    if z is None:
+        # Sample noise
+        z = Variable(FloatTensor(np.random.normal(0, 1, (n_row ** 2, opt.latent_dim))))
     # Get labels ranging from 0 to n_classes for n rows
     labels = np.array([num for _ in range(n_row) for num in range(n_row)])
     labels = Variable(LongTensor(labels))
     gen_imgs = generator(z, labels)
-    save_image(gen_imgs.data, "images/%d.png" % batches_done, nrow=n_row, normalize=True)
+    save_image(gen_imgs.data, os.path.join(global_config.generated_image_root,"%d.png" % batches_done), nrow=n_row, normalize=True)
 
+# 初始化log记录器
+writer = SummaryWriter(log_dir=global_config.log_root)
+# 使用一个固定的latent code来生成图片，更易观察模型的演化
+fixed_z = Variable(FloatTensor(np.random.normal(0, 1, (opt.sample_rows ** 2, opt.latent_dim))))
 
 # ----------
 #  Training
@@ -217,7 +245,9 @@ for epoch in range(opt.n_epochs):
         # Calculate discriminator accuracy
         pred = np.concatenate([real_aux.data.cpu().numpy(), fake_aux.data.cpu().numpy()], axis=0)
         gt = np.concatenate([labels.data.cpu().numpy(), gen_labels.data.cpu().numpy()], axis=0)
-        d_acc = np.mean(np.argmax(pred, axis=1) == gt)
+        d_acc = np.mean(np.argmax(pred, axis=1) == gt) #argmax在分类维度上找出概率最大的分类，看有多少个相等的，并除总数，得到准确率（Top-1 Acc）
+        d_real_acc = np.mean(np.argmax(real_aux.data.cpu().numpy(),axis=1)) #在真实数据集上的Top-1 Acc
+        d_fake_acc = np.mean(np.argmax(real_aux.data.cpu().numpy(),axis=1)) #在生成数据集上的Top-1 Acc
 
         d_loss.backward()
         optimizer_D.step()
@@ -226,6 +256,33 @@ for epoch in range(opt.n_epochs):
             "[Epoch %d/%d] [Batch %d/%d] [D loss: %f, acc: %d%%] [G loss: %f]"
             % (epoch, opt.n_epochs, i, len(dataloader), d_loss.item(), 100 * d_acc, g_loss.item())
         )
+
         batches_done = epoch * len(dataloader) + i
+        writer.add_scalar("loss/G_loss", g_loss.item(), global_step=batches_done)  # 横轴iter纵轴G_loss
+        writer.add_scalar("loss/D_loss", d_loss.item(), global_step=batches_done)  # 横轴iter纵轴D_loss
+        writer.add_scalars("loss/loss", {"g_loss": g_loss.item(), "d_loss": d_loss.item()},
+                           global_step=batches_done)  # 两个loss画在一张图里
+        writer.add_scalar("acc/real_acc",d_real_acc,global_step=batches_done)
+        writer.add_scalar("acc/fake_acc",d_fake_acc,global_step=batches_done)
+        writer.add_scalar("acc/all_acc",d_acc,global_step=batches_done)
+        writer.add_scalars("acc/acc",{"real":d_real_acc,"fake":d_fake_acc,"all":d_acc})
         if batches_done % opt.sample_interval == 0:
-            sample_image(n_row=10, batches_done=batches_done)
+            sample_image(n_row=opt.sample_rows, batches_done=batches_done, z=fixed_z)
+
+    if epoch % opt.generator_interval == 0:
+        # 保存生成器
+        torch.save(generator.state_dict(),
+                   os.path.join(global_config.pretrained_generator_root, "%05d_ckpt_g.pth" % epoch))  # 只保存一个生成器
+
+    # 最后再保存一遍所有信息
+    # 定义所有需要保存并加载的参数，以字典的形式
+    state = {
+        'epoch': epoch,
+        'G_state_dict': generator.module.state_dict(),
+        'D_state_dict': discriminator.module.state_dict(),
+        'optimizer_G': optimizer_G.state_dict(),
+        'optimizer_D': optimizer_D.state_dict(),
+    }
+    torch.save(state, os.path.join(global_config.checkpoint_root, "%05d_ckpt.pth" % epoch))  # 保存checkpoint的时候用字典，方便恢复
+    torch.save(generator.state_dict(), os.path.join(global_config.pretrained_generator_root,
+                                                    "%05d_ckpt_g.pth" % epoch))  # 只保存一个带有模型信息和参数的生成器，用于后续生成图片

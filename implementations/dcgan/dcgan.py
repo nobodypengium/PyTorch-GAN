@@ -62,7 +62,7 @@ class Generator(nn.Module):
     def __init__(self):
         super(Generator, self).__init__()
 
-        self.init_size = opt.img_size // 8 # 4
+        self.init_size = opt.img_size // 8 # 4*4
         self.l1 = nn.Sequential(nn.Linear(opt.latent_dim, 256 * self.init_size ** 2)) # 通过本步与forward中的out.view，将latent code处理为第一层卷积接收的小分辨率大深度数据
 
         self.conv_blocks = nn.Sequential(
@@ -143,7 +143,7 @@ dataloader = torch.utils.data.DataLoader(
     datasets.MNIST(
         global_config.data_root,
         train=True,
-        download=True,
+        download=False,
         transform=transforms.Compose(
             [transforms.Resize(opt.img_size), transforms.ToTensor(), transforms.Normalize([0.5], [0.5])]
         ),
@@ -221,7 +221,7 @@ for epoch in range(opt.n_epochs):
             save_image(sampled_imgs.data[:25], os.path.join(global_config.generated_image_root,"%d.png" % batches_done), nrow=5, normalize=True)
             writer.add_scalar("loss/G_loss", g_loss.item(), global_step=batches_done)  # 横轴iter纵轴G_loss
             writer.add_scalar("loss/D_loss", d_loss.item(), global_step=batches_done)  # 横轴iter纵轴D_loss
-            writer.add_scalars("loss/loss", {"g_loss":g_loss.item(),"d_loss":d_loss.item()}, global_step=batches_done)  # 横轴iter纵轴D_loss
+            writer.add_scalars("loss/loss", {"g_loss":g_loss.item(),"d_loss":d_loss.item()}, global_step=batches_done)  # 两个loss画在一张图里
 
     if epoch % opt.generator_interval == 0:
         # 保存生成器
