@@ -220,7 +220,9 @@ for epoch in range(opt.n_epochs):
 
         # Loss measures generator's ability to fool the discriminator
         validity, pred_label = discriminator(gen_imgs)
-        g_loss = 0.5 * (adversarial_loss(validity, valid) + auxiliary_loss(pred_label, gen_labels))
+        g_loss_adv=adversarial_loss(validity, valid)
+        g_loss_aux=auxiliary_loss(pred_label, gen_labels)
+        g_loss = 0.5 * (g_loss_adv + g_loss_aux)
 
         g_loss.backward()
         optimizer_G.step()
@@ -233,11 +235,15 @@ for epoch in range(opt.n_epochs):
 
         # Loss for real images
         real_pred, real_aux = discriminator(real_imgs)
-        d_real_loss = (adversarial_loss(real_pred, valid) + auxiliary_loss(real_aux, labels)) / 2
+        d_real_loss_adv = adversarial_loss(real_pred, valid)
+        d_real_loss_aux = auxiliary_loss(real_aux, labels)
+        d_real_loss = (d_real_loss_adv + d_real_loss_aux) / 2
 
         # Loss for fake images
         fake_pred, fake_aux = discriminator(gen_imgs.detach())
-        d_fake_loss = (adversarial_loss(fake_pred, fake) + auxiliary_loss(fake_aux, gen_labels)) / 2
+        d_fake_loss_adv=adversarial_loss(fake_pred, fake)
+        d_fake_loss_aux=auxiliary_loss(fake_aux, gen_labels)
+        d_fake_loss = (d_fake_loss_adv + d_fake_loss_aux) / 2
 
         # Total discriminator loss
         d_loss = (d_real_loss + d_fake_loss) / 2
@@ -247,7 +253,7 @@ for epoch in range(opt.n_epochs):
         gt = np.concatenate([labels.data.cpu().numpy(), gen_labels.data.cpu().numpy()], axis=0)
         d_acc = np.mean(np.argmax(pred, axis=1) == gt) #argmax在分类维度上找出概率最大的分类，看有多少个相等的，并除总数，得到准确率（Top-1 Acc）
         d_real_acc = np.mean(np.argmax(real_aux.data.cpu().numpy(),axis=1) == labels.data.cpu().numpy()) #在真实数据集上的Top-1 Acc
-        d_fake_acc = np.mean(np.argmax(real_aux.data.cpu().numpy(),axis=1) == labels.data.cpu().numpy()) #在生成数据集上的Top-1 Acc
+        d_fake_acc = np.mean(np.argmax(fake_aux.data.cpu().numpy(),axis=1) == gen_labels.data.cpu().numpy()) #在生成数据集上的Top-1 Acc
 
         d_loss.backward()
         optimizer_D.step()
@@ -262,10 +268,12 @@ for epoch in range(opt.n_epochs):
         writer.add_scalar("loss/D_loss", d_loss.item(), global_step=batches_done)  # 横轴iter纵轴D_loss
         writer.add_scalars("loss/loss", {"g_loss": g_loss.item(), "d_loss": d_loss.item()},
                            global_step=batches_done)  # 两个loss画在一张图里
-        writer.add_scalar("acc/real_acc",d_real_acc,global_step=batches_done)
+        writer.add_scalar("acc/real_acc",d_real_acc,global_step=batches_done) # 辅助分类器的准确率
         writer.add_scalar("acc/fake_acc",d_fake_acc,global_step=batches_done)
         writer.add_scalar("acc/all_acc",d_acc,global_step=batches_done)
         writer.add_scalars("acc/acc",{"real":d_real_acc,"fake":d_fake_acc,"all":d_acc},global_step=batches_done)
+        writer.add_scalars("loss_contribute/d_real_loss",{"d_real_loss":d_real_loss.item()/2,"d_real_loss_adv":d_real_loss_adv.item()/2,"d_real_loss_aux":d_real_loss_aux.item()/2},global_step=batches_done) # /2由于总D损失是由real和fake相加/2的，所以这里记录也/2
+        writer.add_scalars("loss_contribute/d_fake_loss",{"d_fake_loss":d_fake_loss.item()/2,"d_fake_loss_adv":d_fake_loss_adv.item()/2,"d_fake_loss_aux":d_fake_loss_aux.item()/2},global_step=batches_done)
         if batches_done % opt.sample_interval == 0:
             sample_image(n_row=opt.sample_rows, batches_done=batches_done, z=fixed_z)
 
@@ -275,6 +283,14 @@ for epoch in range(opt.n_epochs):
                    os.path.join(global_config.pretrained_generator_root, "%05d_ckpt_g.pth" % epoch))  # 只保存一个生成器
 
     # 最后再保存一遍所有信息
+    # 多卡训练情况下，需要从嵌套类DataParallel中取出
+    if opt.gpus is not None:
+        generator_module=generator.module
+        discriminator_module=discriminator.module
+    else:
+        generator_module=generator
+        discriminator_module = discriminator
+
     # 定义所有需要保存并加载的参数，以字典的形式
     state = {
         'epoch': epoch,
