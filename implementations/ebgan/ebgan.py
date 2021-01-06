@@ -66,8 +66,8 @@ class Generator(nn.Module):
     def __init__(self):
         super(Generator, self).__init__()
 
-        self.init_size = opt.img_size // 4
-        self.l1 = nn.Sequential(nn.Linear(opt.latent_dim, 128 * self.init_size ** 2))
+        self.init_size = opt.img_size // 4 # 32//4=8
+        self.l1 = nn.Sequential(nn.Linear(opt.latent_dim, 128 * self.init_size ** 2)) # 62->128*64
 
         self.conv_blocks = nn.Sequential(
             nn.Upsample(scale_factor=2),
